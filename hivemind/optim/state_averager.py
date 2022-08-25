@@ -8,6 +8,7 @@ from itertools import chain
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Sequence, Tuple, Union
 
 import torch
+import wandb
 
 import hivemind
 from hivemind.averaging import DecentralizedAverager
@@ -534,6 +535,10 @@ class TrainingStateAverager(DecentralizedAverager):
                     try:
                         averaging_control.allow_allreduce()
                         gathered = averaging_control.result(timeout=timeout)
+                        wandb.log({
+                            "averager/averaged_parameters": 1,
+                            "averager/averaged_parameters_peers": len(gathered)
+                        })
                         logger.log(self.status_loglevel, f"Averaged parameters with {len(gathered)} peers")
                     except BaseException as e:
                         logger.log(self.status_loglevel, f"Averaging failed with {type(e)}")

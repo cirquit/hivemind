@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+import wandb
 
 from hivemind.averaging.allreduce import AllreduceException, AllReduceRunner, AveragingMode, GroupID
 from hivemind.averaging.control import AveragingStage, StepControl
@@ -449,6 +450,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                     group_info = await matchmaking_task
 
                     if group_info is None:
+                        wandb.log({ "averager/error/no_group": 1 })
                         raise AllreduceException("Averaging step failed: could not find a group")
 
                     with self._register_allreduce_group(group_info):
@@ -534,6 +536,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
         except BaseException as e:
             if isinstance(e, Exception):
                 logger.exception(e)
+            wandb.log({ "averager/error/unable_allreduce": 1 })
             raise MatchmakingException(f"Unable to run All-Reduce: {e}")
 
     async def _run_allreduce_inplace_(
