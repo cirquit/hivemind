@@ -450,7 +450,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                     group_info = await matchmaking_task
 
                     if group_info is None:
-                        wandb.log({ "averager/error/no_group": 1 })
+                        wandb.log({ "03_hivemind/averaging_group_not_found": 1 }, commit=False)
                         raise AllreduceException("Averaging step failed: could not find a group")
 
                     with self._register_allreduce_group(group_info):
@@ -726,7 +726,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                         if not metadata:
                             logger.debug(f"Peer {peer} did not send its state")
                             continue
-
+                        wandb.log({ "03_hivemind/downloaded_state_from_peer": 1 }, commit=False)
                         logger.info(f"Finished downloading state from {peer}")
                         future.set_result((metadata, tensors))
                         return

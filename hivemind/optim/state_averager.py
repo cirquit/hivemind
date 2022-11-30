@@ -536,9 +536,9 @@ class TrainingStateAverager(DecentralizedAverager):
                         averaging_control.allow_allreduce()
                         gathered = averaging_control.result(timeout=timeout)
                         wandb.log({
-                            "averager/averaged_parameters": 1,
-                            "averager/averaged_parameters_peers": len(gathered)
-                        })
+                            "03_hivemind/averaging_finished": 1,
+                            "03_hivemind/averaged_with_peercount": len(gathered)
+                        }, commit=False)
                         logger.log(self.status_loglevel, f"Averaged parameters with {len(gathered)} peers")
                     except BaseException as e:
                         logger.log(self.status_loglevel, f"Averaging failed with {type(e)}")
