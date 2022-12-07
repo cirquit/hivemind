@@ -168,7 +168,7 @@ class ProgressTracker(threading.Thread):
             self.performance_ema.reset_timer()
         
         self.local_progress = self._get_local_progress(local_epoch, samples_accumulated)
-        logger.info(f"progress_tracker.report_local_progress: set self.local_progress.epoch to {self.local_progress.epoch} and samples_accumulated to {self.local_progress.samples_accumulated}"
+        logger.info(f"progress_tracker.report_local_progress: set self.local_progress.epoch to {self.local_progress.epoch} and samples_accumulated to {self.local_progress.samples_accumulated}")
         self.should_report_progress.set()
 
     @contextlib.contextmanager

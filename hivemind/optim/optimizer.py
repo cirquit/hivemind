@@ -551,9 +551,9 @@ class Optimizer(torch.optim.Optimizer):
             self.tracker.report_local_progress(self.local_epoch, samples_accumulated=0)
             self.grad_averager.reset_accumulated_grads_()
             return False
-        logger.info(f"Optimizer._check_and_accumulate_gradients called with batchsize {batch_size}"
+        logger.info(f"Optimizer._check_and_accumulate_gradients called with batchsize {batch_size}")
         self.grad_averager.accumulate_grads_(batch_size)
-        logger.info(f"Optimizer.tracker.report_local_progress called with epoch: {self.local_epoch} and grad_avg.local_samples_accumulated: {self.grad_averager.local_samples_accumulated}"
+        logger.info(f"Optimizer.tracker.report_local_progress called with epoch: {self.local_epoch} and grad_avg.local_samples_accumulated: {self.grad_averager.local_samples_accumulated}")
         self.tracker.report_local_progress(self.local_epoch, self.grad_averager.local_samples_accumulated)
         return True
 
