@@ -553,6 +553,11 @@ class TrainingStateAverager(DecentralizedAverager):
                     if self.local_epoch != old_epoch:
                         logger.log(self.status_loglevel, f"Found peer with newer epoch ({self.local_epoch})")
                         self._update_scheduler()
+            else:
+                wandb.log({
+                    "03_hivemind/averaging_finished": 0
+                    "03_hivemind/averaged_with_peercount": -1
+                }, commit=False)
 
         except Exception as e:
             if not began_running:

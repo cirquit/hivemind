@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 import numpy as np
-from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
-
 from hivemind.dht import DHT
-from hivemind.dht.schema import BytesWithPublicKey, RSASignatureValidator, SchemaValidator
-from hivemind.utils import DHTExpiration, ValueWithExpiration, enter_asynchronously, get_dht_time, get_logger
+from hivemind.dht.schema import (BytesWithPublicKey, RSASignatureValidator,
+                                 SchemaValidator)
+from hivemind.utils import (DHTExpiration, ValueWithExpiration,
+                            enter_asynchronously, get_dht_time, get_logger)
 from hivemind.utils.crypto import RSAPrivateKey
 from hivemind.utils.performance_ema import PerformanceEMA
+from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
 
 logger = get_logger(__name__)
 
@@ -155,13 +156,16 @@ class ProgressTracker(threading.Thread):
         extra_samples = samples_accumulated - self.local_progress.samples_accumulated
         if update_global_samples and local_epoch == self.local_progress.epoch == self.global_progress.epoch:
             self.global_progress.samples_accumulated += extra_samples
+            logger.info(f"ProgressTracker.report_local_progress: Added {extra_samples} to global_progress.samples_accumulated: {self.global_progress.samples_accumulated}"}
             # note: the above line can decrease the number of samples, e.g. if forced to reset due to overflow
+        else:
+            logger.info(f"ProgressTracker did not add {extra_samples} to global_progress.samples_accumulated due to: {update_global_samples} and local_epoch: {local_epoch} == self.local_progress.epoch {self.local_progress.epoch} == self.global_progress.epoch {self.global_progress.epoch}")
 
         if extra_samples > 0:
             self.performance_ema.update(task_size=extra_samples)
-            logger.debug(f"Updated performance EMA: {self.performance_ema.samples_per_second:.5f}")
+            logger.info(f"ProgressTracker.report_local_progress: Updated performance EMA {self.performance_ema.samples_per_second:.5f} samples/s")
         else:
-            logger.debug("Resetting performance timestamp to current time (progress was reset)")
+            logger.info("Resetting performance timestamp to current time (progress was reset)")
             self.performance_ema.reset_timer()
 
         self.local_progress = self._get_local_progress(local_epoch, samples_accumulated)
@@ -203,7 +207,7 @@ class ProgressTracker(threading.Thread):
                 logger.debug(f"Will report progress again in {wait_timeout} seconds or on user command")
                 await asyncio.get_event_loop().run_in_executor(None, self.should_report_progress.wait, wait_timeout)
                 if self.should_report_progress.is_set():
-                    logger.debug(f"Progress update triggered by report_local_progress")
+                    logger.info(f"ProgressTracker._progress_reporter (async): Progress update triggered by report_local_progress")
                     self.should_report_progress.clear()
                 else:
                     logger.debug(f"Progress update triggered by metadata_expiration")
@@ -227,6 +231,9 @@ class ProgressTracker(threading.Thread):
                             timeout=self.metadata_expiration,
                         )
                     )
+                    logger.info("ProgressTracker._progress_reporter (async): DHT store ops is finished for the local progress dict")
+                    for key,value in local_progress.dict():
+                        logger.info(f" - {key}: {value}")
         finally:
             logger.log(self.status_loglevel, f"No longer reporting progress for {self.prefix}")
             if store_task is not None:
