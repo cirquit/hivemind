@@ -6,14 +6,13 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 import numpy as np
+from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
+
 from hivemind.dht import DHT
-from hivemind.dht.schema import (BytesWithPublicKey, RSASignatureValidator,
-                                 SchemaValidator)
-from hivemind.utils import (DHTExpiration, ValueWithExpiration,
-                            enter_asynchronously, get_dht_time, get_logger)
+from hivemind.dht.schema import BytesWithPublicKey, RSASignatureValidator, SchemaValidator
+from hivemind.utils import DHTExpiration, ValueWithExpiration, enter_asynchronously, get_dht_time, get_logger
 from hivemind.utils.crypto import RSAPrivateKey
 from hivemind.utils.performance_ema import PerformanceEMA
-from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
 
 logger = get_logger(__name__)
 
@@ -156,7 +155,7 @@ class ProgressTracker(threading.Thread):
         extra_samples = samples_accumulated - self.local_progress.samples_accumulated
         if update_global_samples and local_epoch == self.local_progress.epoch == self.global_progress.epoch:
             self.global_progress.samples_accumulated += extra_samples
-            logger.info(f"ProgressTracker.report_local_progress: Added {extra_samples} to global_progress.samples_accumulated: {self.global_progress.samples_accumulated}"}
+            logger.info(f"ProgressTracker.report_local_progress: Added {extra_samples} to  global_progress.samples_accumulated: {self.global_progress.samples_accumulated}")
             # note: the above line can decrease the number of samples, e.g. if forced to reset due to overflow
         else:
             logger.info(f"ProgressTracker did not add {extra_samples} to global_progress.samples_accumulated due to: {update_global_samples} and local_epoch: {local_epoch} == self.local_progress.epoch {self.local_progress.epoch} == self.global_progress.epoch {self.global_progress.epoch}")
