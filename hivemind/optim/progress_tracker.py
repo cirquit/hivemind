@@ -231,8 +231,8 @@ class ProgressTracker(threading.Thread):
                         )
                     )
                     logger.info("ProgressTracker._progress_reporter (async): DHT store ops is finished for the local progress dict")
-                    for key,value in local_progress.dict():
-                        logger.info(f" - {key}: {value}")
+                    for key,value in local_progress.items():
+                       logger.info(f" - {key}: {value}")
         finally:
             logger.log(self.status_loglevel, f"No longer reporting progress for {self.prefix}")
             if store_task is not None:
