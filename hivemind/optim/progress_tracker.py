@@ -34,7 +34,7 @@ class LocalTrainingProgress(BaseModel):
     samples_accumulated: conint(ge=0, strict=True)
     samples_per_second: confloat(ge=0.0, strict=True)
     time: StrictFloat
-    clie nt_mode: StrictBool
+    client_mode: StrictBool
 
 
 class TrainingProgressSchema(BaseModel):
