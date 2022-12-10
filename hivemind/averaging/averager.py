@@ -604,6 +604,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
 
     async def _declare_for_download_periodically(self):
         download_key = f"{self._matchmaking.group_key_manager.prefix}.all_averagers"
+        logger.info(f"DecentralizedAverager:_declare_for_download_periodically: download_key = {download_key}")
         sharing_was_allowed = self.allow_state_sharing
         while True:
             expiration_time = get_dht_time() + self.declare_state_period
@@ -691,6 +692,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
             timeout = self.next_chunk_timeout if self.next_chunk_timeout is not None else self.request_timeout
         try:
             key_manager = self._matchmaking.group_key_manager
+            logger.info(f"DecentralizedAverager:_load_state_from_peers: all_averagers key = {key_manager.prefix}.all_averagers")
             peer_priority, _ = self.dht.get(f"{key_manager.prefix}.all_averagers", latest=True) or ({}, None)
             peer_priority = {
                 PeerID(peer_id): (float(info.value), random.random())  # using randomness as a tie breaker
@@ -726,8 +728,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                         if not metadata:
                             logger.debug(f"Peer {peer} did not send its state")
                             continue
-                        wandb.log({ "03_hivemind/downloaded_state_from_peer": 1 }, commit=False)
-                        logger.info(f"Finished downloading state from {peer}")
+                        logger.info(f"DecentralizedAverager:_load_state_from_peers: Finished downloading state from {peer}")
                         future.set_result((metadata, tensors))
                         return
                     except Exception as e:
