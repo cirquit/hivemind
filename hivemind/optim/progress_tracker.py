@@ -317,7 +317,7 @@ class ProgressTracker(threading.Thread):
         logger.info(f"ProgressTracker._parse_swarm_progress_data: Accumulating samples for global epoch {global_epoch}...")
         for peer in valid_peer_entries:
             total_samples_per_second += peer.samples_per_second
-            logger.info(f"  - peer:{peer_id}, local_epoch: {peer.epoch}, sps: {peer.samples_per_second}")
+            logger.info(f"  - peer:{peer.peer_id}, local_epoch: {peer.epoch}, sps: {peer.samples_per_second}")
             if peer.epoch == global_epoch:
                 logger.info(f"    + epoch matches! samples_accumulated: {peer.samples_accumulated}")
                 total_samples_accumulated += peer.samples_accumulated
