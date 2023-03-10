@@ -1,6 +1,8 @@
 import asyncio
 import multiprocessing as mp
+import os
 import subprocess
+import tempfile
 from contextlib import closing
 from functools import partial
 from typing import List
@@ -11,8 +13,9 @@ from multiaddr import Multiaddr
 
 from hivemind.p2p import P2P, P2PDaemonError, P2PHandlerError
 from hivemind.proto import dht_pb2, test_pb2
-from hivemind.utils.networking import get_free_port
 from hivemind.utils.serializer import MSGPackSerializer
+
+from test_utils.networking import get_free_port
 
 
 def is_process_running(pid: int) -> bool:
@@ -43,6 +46,57 @@ async def test_startup_error_message():
 
     with pytest.raises(P2PDaemonError, match=r"Daemon failed to start in .+ seconds"):
         await P2P.create(startup_timeout=0.01)  # Test that startup_timeout works
+
+
+@pytest.mark.asyncio
+async def test_identity():
+    with tempfile.TemporaryDirectory() as tempdir:
+        id1_path = os.path.join(tempdir, "id1")
+        id2_path = os.path.join(tempdir, "id2")
+        p2ps = await asyncio.gather(*[P2P.create(identity_path=path) for path in [None, None, id1_path, id2_path]])
+
+        # We create the second daemon with id2 separately
+        # to avoid a race condition while saving a newly generated identity
+        p2ps.append(await P2P.create(identity_path=id2_path))
+
+        # Using the same identity (if any) should lead to the same peer ID
+        assert p2ps[-2].peer_id == p2ps[-1].peer_id
+
+        # The rest of peer IDs should be different
+        peer_ids = {instance.peer_id for instance in p2ps}
+        assert len(peer_ids) == 4
+
+        for instance in p2ps:
+            await instance.shutdown()
+
+    with pytest.raises(FileNotFoundError, match=r"The directory.+does not exist"):
+        P2P.generate_identity(id1_path)
+
+
+@pytest.mark.asyncio
+async def test_check_if_identity_free():
+    with tempfile.TemporaryDirectory() as tempdir:
+        id1_path = os.path.join(tempdir, "id1")
+        id2_path = os.path.join(tempdir, "id2")
+
+        p2ps = [await P2P.create(identity_path=id1_path)]
+        initial_peers = await p2ps[0].get_visible_maddrs()
+
+        p2ps.append(await P2P.create(initial_peers=initial_peers))
+        p2ps.append(await P2P.create(initial_peers=initial_peers, identity_path=id2_path))
+
+        with pytest.raises(P2PDaemonError, match=r"Identity.+is already taken by another peer"):
+            await P2P.create(initial_peers=initial_peers, identity_path=id1_path)
+        with pytest.raises(P2PDaemonError, match=r"Identity.+is already taken by another peer"):
+            await P2P.create(initial_peers=initial_peers, identity_path=id2_path)
+
+        # Must work if a P2P with a certain identity is restarted
+        await p2ps[-1].shutdown()
+        p2ps.pop()
+        p2ps.append(await P2P.create(initial_peers=initial_peers, identity_path=id2_path))
+
+        for instance in p2ps:
+            await instance.shutdown()
 
 
 @pytest.mark.parametrize(

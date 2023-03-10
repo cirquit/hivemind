@@ -8,7 +8,7 @@ from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.resources import path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple, Type, TypeVar, Union
 
 from google.protobuf.message import Message
 from multiaddr import Multiaddr
@@ -17,8 +17,11 @@ import hivemind.hivemind_cli as cli
 import hivemind.p2p.p2p_daemon_bindings.p2pclient as p2pclient
 from hivemind.p2p.p2p_daemon_bindings.control import DEFAULT_MAX_MSG_SIZE, P2PDaemonError, P2PHandlerError
 from hivemind.p2p.p2p_daemon_bindings.datastructures import PeerID, PeerInfo, StreamInfo
+from hivemind.p2p.p2p_daemon_bindings.utils import ControlFailure
+from hivemind.proto import crypto_pb2
 from hivemind.proto.p2pd_pb2 import RPCError
 from hivemind.utils.asyncio import as_aiter, asingle
+from hivemind.utils.crypto import RSAPrivateKey
 from hivemind.utils.logging import get_logger, golog_level_to_python, loglevel, python_level_to_golog
 
 logger = get_logger(__name__)
@@ -99,6 +102,12 @@ class P2P:
         use_relay_hop: bool = False,
         use_relay_discovery: bool = False,
         persistent_conn_max_msg_size: int = DEFAULT_MAX_MSG_SIZE,
+        quic: Optional[bool] = None,
+        use_relay_hop: Optional[bool] = None,
+        use_relay_discovery: Optional[bool] = None,
+        check_if_identity_free: bool = True,
+        no_listen: bool = False,
+        trusted_relays: Optional[Sequence[Union[Multiaddr, str]]] = None,
     ) -> "P2P":
         """
         Start a new p2pd process and connect to it.
@@ -112,8 +121,8 @@ class P2P:
                          Details: https://pkg.go.dev/github.com/libp2p/go-libp2p-kad-dht#ModeOpt
         :param force_reachability: Force reachability mode (public/private)
         :param host_maddrs: Multiaddrs to listen for external connections from other p2p instances
-        :param identity_path: Path to a pre-generated private key file. If defined, makes the peer ID deterministic.
-                              May be generated using ``./p2p-keygen`` from ``go-libp2p-daemon``.
+        :param identity_path: Path to a private key file. If defined, makes the peer ID deterministic.
+                              If the file does not exist yet, writes a new private key to this file.
         :param idle_timeout: kill daemon if client has been idle for a given number of
                              seconds before opening persistent streams
         :param nat_port_map: Enables NAT port mapping
@@ -121,11 +130,21 @@ class P2P:
         :param relay_hop_limit: sets the hop limit for hop relays
         :param startup_timeout: raise a P2PDaemonError if the daemon does not start in ``startup_timeout`` seconds
         :param tls: Enables TLS1.3 channel security protocol
-        :param use_auto_relay: enables autorelay
         :param use_ipfs: Bootstrap to IPFS (incompatible with initial_peers)
-        :param use_relay: enables circuit relay
-        :param use_relay_hop: enables hop for relay
-        :param use_relay_discovery: enables passive discovery for relay
+        :param use_relay: Enable circuit relay functionality in libp2p
+                          (see https://docs.libp2p.io/concepts/nat/circuit-relay/).
+                          If enabled (default), you can reach peers behind NATs/firewalls through libp2p relays.
+                          If you are behind NAT/firewall yourself,
+                          please pass `use_auto_relay=True` to become reachable.
+        :param use_auto_relay: Look for libp2p relays to become reachable if we are behind NAT/firewall
+        :param quic: Deprecated, has no effect since libp2p 0.17.0
+        :param use_relay_hop: Deprecated, has no effect since libp2p 0.17.0
+        :param use_relay_discovery: Deprecated, has no effect since libp2p 0.17.0
+        :param check_if_identity_free: If enabled (default), ``identity_path`` is provided,
+                                       and we are connecting to an existing swarm,
+                                       ensure that this identity is not used by other peers already.
+                                       This slows down ``P2P.create()`` but protects from unintuitive libp2p errors
+                                       appearing in case of the identity collision.
         :return: a wrapper for the p2p daemon
         """
 
@@ -147,16 +166,35 @@ class P2P:
                     raise ValueError("Please specify an explicit port in announce_maddrs: port 0 is not supported")
 
         need_bootstrap = bool(initial_peers) or use_ipfs
-        process_kwargs = cls.DHT_MODE_MAPPING.get(dht_mode, {"dht": 0})
+        process_kwargs = cls.DHT_MODE_MAPPING[dht_mode].copy()
         process_kwargs.update(cls.FORCE_REACHABILITY_MAPPING.get(force_reachability, {}))
         for param, value in [
             ("bootstrapPeers", initial_peers),
             ("hostAddrs", host_maddrs),
             ("announceAddrs", announce_maddrs),
+            ("trustedRelays", trusted_relays),
         ]:
             if value:
                 process_kwargs[param] = self._maddrs_to_str(value)
+        if no_listen:
+            process_kwargs["noListenAddrs"] = 1
         if identity_path is not None:
+            if os.path.isfile(identity_path):
+                if check_if_identity_free and need_bootstrap:
+                    logger.info(f"Checking that identity from `{identity_path}` is not used by other peers")
+                    if await cls.is_identity_taken(
+                        identity_path,
+                        initial_peers=initial_peers,
+                        tls=tls,
+                        use_auto_relay=use_auto_relay,
+                        use_ipfs=use_ipfs,
+                        use_relay=use_relay,
+                    ):
+                        raise P2PDaemonError(f"Identity from `{identity_path}` is already taken by another peer")
+            else:
+                logger.info(f"Generating new identity to be saved in `{identity_path}`")
+                self.generate_identity(identity_path)
+                # A newly generated identity is not taken with ~100% probability
             process_kwargs["id"] = identity_path
 
         proc_args = self._make_process_args(
@@ -204,6 +242,50 @@ class P2P:
 
         await self._ping_daemon()
         return self
+
+    @classmethod
+    async def is_identity_taken(
+        cls,
+        identity_path: str,
+        *,
+        initial_peers: Optional[Sequence[Union[Multiaddr, str]]],
+        tls: bool,
+        use_auto_relay: bool,
+        use_ipfs: bool,
+        use_relay: bool,
+    ) -> bool:
+        with open(identity_path, "rb") as f:
+            peer_id = PeerID.from_identity(f.read())
+
+        anonymous_p2p = await cls.create(
+            initial_peers=initial_peers,
+            dht_mode="client",
+            tls=tls,
+            use_auto_relay=use_auto_relay,
+            use_ipfs=use_ipfs,
+            use_relay=use_relay,
+        )
+        try:
+            await anonymous_p2p._client.connect(peer_id, [])
+            return True
+        except ControlFailure:
+            return False
+        finally:
+            await anonymous_p2p.shutdown()
+
+    @staticmethod
+    def generate_identity(identity_path: str) -> None:
+        private_key = RSAPrivateKey()
+        protobuf = crypto_pb2.PrivateKey(key_type=crypto_pb2.KeyType.RSA, data=private_key.to_bytes())
+
+        try:
+            with open(identity_path, "wb") as f:
+                f.write(protobuf.SerializeToString())
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"The directory `{os.path.dirname(identity_path)}` for saving the identity does not exist"
+            )
+        os.chmod(identity_path, 0o400)
 
     @classmethod
     async def replicate(cls, daemon_listen_maddr: Multiaddr) -> "P2P":
@@ -315,6 +397,7 @@ class P2P:
         handler: Callable[[TInputStream, P2PContext], TOutputStream],
         input_protobuf_type: Type[Message],
         max_prefetch: int = 5,
+        balanced: bool = False,
     ) -> None:
         """
         :param max_prefetch: Maximum number of items to prefetch from the request stream.
@@ -379,7 +462,7 @@ class P2P:
                 finally:
                     processing_task.cancel()
 
-        await self.add_binary_stream_handler(name, _handle_stream)
+        await self.add_binary_stream_handler(name, _handle_stream, balanced=balanced)
 
     async def _iterate_protobuf_stream_handler(
         self, peer_id: PeerID, name: str, requests: TInputStream, output_protobuf_type: Type[Message]
@@ -421,16 +504,19 @@ class P2P:
         *,
         stream_input: bool = False,
         stream_output: bool = False,
+        balanced: bool = False,
     ) -> None:
         """
         :param stream_input: If True, assume ``handler`` to take ``TInputStream``
                              (not just ``TInputProtobuf``) as input.
         :param stream_output: If True, assume ``handler`` to return ``TOutputStream``
                               (not ``Awaitable[TOutputProtobuf]``).
+        :param balanced: If True, handler will be balanced on p2pd side between all handlers in python.
+                         Default: False
         """
 
         if not stream_input and not stream_output:
-            await self._add_protobuf_unary_handler(name, handler, input_protobuf_type)
+            await self._add_protobuf_unary_handler(name, handler, input_protobuf_type, balanced=balanced)
             return
 
         async def _stream_handler(requests: P2P.TInputStream, context: P2PContext) -> P2P.TOutputStream:
@@ -443,13 +529,27 @@ class P2P:
             else:
                 yield await output
 
-        await self._add_protobuf_stream_handler(name, _stream_handler, input_protobuf_type)
+        await self._add_protobuf_stream_handler(name, _stream_handler, input_protobuf_type, balanced=balanced)
+
+    async def remove_protobuf_handler(
+        self,
+        name: str,
+        *,
+        stream_input: bool = False,
+        stream_output: bool = False,
+    ) -> None:
+        if not stream_input and not stream_output:
+            await self._client.remove_unary_handler(name)
+            return
+
+        await self.remove_binary_stream_handler(name)
 
     async def _add_protobuf_unary_handler(
         self,
         handle_name: str,
         handler: Callable[[TInputProtobuf, P2PContext], Awaitable[TOutputProtobuf]],
         input_protobuf_type: Type[Message],
+        balanced: bool = False,
     ) -> None:
         """
         Register a request-response (unary) handler. Unary requests and responses
@@ -471,7 +571,7 @@ class P2P:
             response = await handler(input_serialized, context)
             return response.SerializeToString()
 
-        await self._client.add_unary_handler(handle_name, _unary_handler)
+        await self._client.add_unary_handler(handle_name, _unary_handler, balanced=balanced)
 
     async def call_protobuf_handler(
         self,
@@ -515,10 +615,15 @@ class P2P:
 
         self._listen_task = asyncio.create_task(listen())
 
-    async def add_binary_stream_handler(self, name: str, handler: p2pclient.StreamHandler) -> None:
+    async def add_binary_stream_handler(
+        self, name: str, handler: p2pclient.StreamHandler, balanced: bool = False
+    ) -> None:
         if self._listen_task is None:
             self._start_listening()
-        await self._client.stream_handler(name, handler)
+        await self._client.stream_handler(name, handler, balanced)
+
+    async def remove_binary_stream_handler(self, name: str) -> None:
+        await self._client.remove_stream_handler(name)
 
     async def call_binary_stream_handler(
         self, peer_id: PeerID, handler_name: str

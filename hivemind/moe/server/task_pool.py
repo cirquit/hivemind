@@ -27,7 +27,7 @@ class TaskPoolBase(mp.context.ForkProcess, metaclass=ABCMeta):
     def __init__(self, process_func: callable, daemon=True, **kwargs):
         super().__init__(daemon=daemon, **kwargs)
         self.process_func = process_func
-        self._priority = mp.Value(ctypes.c_double, 1.0)  # higher priority = the more urgent to process this pool
+        self._priority = mp.Value(ctypes.c_double, 1.0)  # lower priority = the more urgent to process this pool
 
     @abstractmethod
     def run(self):
@@ -38,7 +38,7 @@ class TaskPoolBase(mp.context.ForkProcess, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def iterate_minibatches(self, *args, **kwargs) -> Generator[List[Task], None, None]:
+    def load_batch_to_runtime(self) -> Tuple[Any, List[torch.Tensor]]:
         pass
 
     @property
@@ -170,7 +170,7 @@ class TaskPool(TaskPoolBase):
             for skip_i in range(prev_num_tasks):
                 finished_task_timestamp = (
                     self.undispatched_task_timestamps.get()
-                )  # earlier timestamp = higher priority
+                )  # earlier timestamp = smaller (better) priority, earlier processing
                 if skip_i == prev_num_tasks - 1:
                     self.priority = finished_task_timestamp
 
@@ -195,28 +195,42 @@ class TaskPool(TaskPoolBase):
 
         while True:
             logger.debug(f"{self.name} waiting for results from runtime")
-            batch_index, batch_outputs = self.outputs_receiver.recv()
-            logger.debug(f"{self.name}, batch {batch_index}: got results")
-
-            # split batch into partitions for individual tasks
+            batch_index, batch_outputs_or_exception = self.outputs_receiver.recv()
             batch_tasks = pending_batches.pop(batch_index)
-            task_sizes = [self.get_task_size(task) for task in batch_tasks]
-            outputs_per_task = zip(*(torch.split_with_sizes(tensor, task_sizes, dim=0) for tensor in batch_outputs))
-            logger.debug(f"{self.name}, batch {batch_index}: sending outputs to handlers")
 
-            # dispatch results to futures
-            for task, task_outputs in zip(batch_tasks, outputs_per_task):
-                try:
-                    task.future.set_result(tuple(task_outputs))
-                except InvalidStateError as e:
-                    logger.debug(f"Failed to send task result due to an exception: {e}")
+            if isinstance(batch_outputs_or_exception, BaseException):
+                logger.debug(f"{self.name}, batch {batch_index}: got exception, propagating to handlers")
+                exception = batch_outputs_or_exception
+                for task in batch_tasks:
+                    try:
+                        task.future.set_exception(exception)
+                    except InvalidStateError as e:
+                        logger.debug(f"Failed to send runtime error to a task: {e}")
+
+            else:
+                logger.debug(f"{self.name}, batch {batch_index}: got results")
+                batch_outputs = batch_outputs_or_exception
+
+                # split batch into partitions for individual tasks
+                task_sizes = [self.get_task_size(task) for task in batch_tasks]
+                outputs_per_task = zip(
+                    *(torch.split_with_sizes(tensor, task_sizes, dim=0) for tensor in batch_outputs)
+                )
+                logger.debug(f"{self.name}, batch {batch_index}: sending outputs to handlers")
+
+                # dispatch results to futures
+                for task, task_outputs in zip(batch_tasks, outputs_per_task):
+                    try:
+                        task.future.set_result(tuple(task_outputs))
+                    except InvalidStateError as e:
+                        logger.debug(f"Failed to send task result due to an exception: {e}")
 
     @property
     def empty(self):
         return not self.batch_receiver.poll()
 
     def load_batch_to_runtime(self, timeout=None, device=None) -> Tuple[Any, List[torch.Tensor]]:
-        """receive next batch of numpy arrays"""
+        """receive next batch of tensors"""
         if not self.batch_receiver.poll(timeout):
             raise TimeoutError()
 
@@ -227,10 +241,14 @@ class TaskPool(TaskPoolBase):
     def send_outputs_from_runtime(self, batch_index: int, batch_outputs: List[torch.Tensor]):
         """send results for a processed batch, previously loaded through load_batch_to_runtime"""
         batch_outputs = [
-            tensor.to(device="cpu").share_memory_().detach().requires_grad_(tensor.requires_grad)
+            tensor.to(device="cpu", non_blocking=False).share_memory_().detach().requires_grad_(tensor.requires_grad)
+            # note: tensor.to deliberately does NOT use non_blocking; non_blocking + share_memory = undefined behavior
             for tensor in batch_outputs
         ]
         self.outputs_sender.send((batch_index, batch_outputs))
+
+    def send_exception_from_runtime(self, batch_index: int, exception: BaseException):
+        self.outputs_sender.send((batch_index, exception))
 
     def get_task_size(self, task: Task) -> int:
         """compute task processing complexity (used for batching); defaults to batch size"""

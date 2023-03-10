@@ -12,7 +12,14 @@ from uuid import UUID, uuid4
 from multiaddr import Multiaddr, protocols
 
 from hivemind.p2p.p2p_daemon_bindings.datastructures import PeerID, PeerInfo, StreamInfo
-from hivemind.p2p.p2p_daemon_bindings.utils import DispatchFailure, raise_if_failed, read_pbmsg_safe, write_pbmsg
+from hivemind.p2p.p2p_daemon_bindings.utils import (
+    DispatchFailure,
+    P2PDaemonError,
+    P2PHandlerError,
+    raise_if_failed,
+    read_pbmsg_safe,
+    write_pbmsg,
+)
 from hivemind.proto import p2pd_pb2 as p2pd_pb
 from hivemind.utils.logging import get_logger
 
@@ -27,6 +34,9 @@ SUPPORTED_PROTOS = (protocols.protocol_with_code(proto) for proto in SUPPORT_CON
 logger = get_logger(__name__)
 
 DEFAULT_MAX_MSG_SIZE = 4 * 1024**2
+MAX_UNARY_PAYLOAD_SIZE = DEFAULT_MAX_MSG_SIZE // 2
+# note: we check vs. 2x max message size to account for serialization overhead. The actual overhead is
+# typically smaller. We err on the side of streaming, because even 2MB messages can be streamed efficiently.
 
 
 def parse_conn_protocol(maddr: Multiaddr) -> int:
@@ -246,19 +256,36 @@ class ControlClient:
         self._read_task = asyncio.create_task(self._read_from_persistent_conn(reader))
         self._write_task = asyncio.create_task(self._write_to_persistent_conn(writer))
 
-    async def add_unary_handler(self, proto: str, handler: TUnaryHandler):
-        call_id = uuid4()
-
-        add_unary_handler_req = p2pd_pb.AddUnaryHandlerRequest(proto=proto)
-        req = p2pd_pb.PersistentConnectionRequest(callId=call_id.bytes, addUnaryHandler=add_unary_handler_req)
-
-        if self.unary_handlers.get(proto):
+    async def add_unary_handler(self, proto: str, handler: TUnaryHandler, balanced: bool = False) -> None:
+        if proto in self.unary_handlers:
             raise P2PDaemonError(f"Handler for protocol {proto} already registered")
         self.unary_handlers[proto] = handler
+
+        call_id = uuid4()
+        req = p2pd_pb.PersistentConnectionRequest(
+            callId=call_id.bytes,
+            addUnaryHandler=p2pd_pb.AddUnaryHandlerRequest(proto=proto, balanced=balanced),
+        )
 
         self._pending_calls[call_id] = asyncio.Future()
         await self._pending_messages.put(req)
         await self._pending_calls[call_id]
+
+    async def remove_unary_handler(self, proto: str) -> None:
+        if proto not in self.unary_handlers:
+            raise P2PDaemonError(f"Handler for protocol {proto} is not registered")
+
+        call_id = uuid4()
+        req = p2pd_pb.PersistentConnectionRequest(
+            callId=call_id.bytes,
+            removeUnaryHandler=p2pd_pb.RemoveUnaryHandlerRequest(proto=proto),
+        )
+
+        self._pending_calls[call_id] = asyncio.Future()
+        await self._pending_messages.put(req)
+        await self._pending_calls[call_id]
+
+        del self.unary_handlers[proto]
 
     async def call_unary_handler(self, peer_id: PeerID, proto: str, data: bytes) -> bytes:
         call_id = uuid4()
@@ -358,12 +385,19 @@ class ControlClient:
 
         return stream_info, reader, writer
 
-    async def stream_handler(self, proto: str, handler_cb: StreamHandler) -> None:
+    async def stream_handler(self, proto: str, handler_cb: StreamHandler, balanced: bool = False) -> None:
+        self.handlers[proto] = handler_cb
+
         reader, writer = await self.daemon_connector.open_connection()
 
-        listen_path_maddr_bytes = self.listen_maddr.to_bytes()
-        stream_handler_req = p2pd_pb.StreamHandlerRequest(addr=listen_path_maddr_bytes, proto=[proto])
-        req = p2pd_pb.Request(type=p2pd_pb.Request.STREAM_HANDLER, streamHandler=stream_handler_req)
+        req = p2pd_pb.Request(
+            type=p2pd_pb.Request.STREAM_HANDLER,
+            streamHandler=p2pd_pb.StreamHandlerRequest(
+                addr=self.listen_maddr.to_bytes(),
+                proto=[proto],
+                balanced=balanced,
+            ),
+        )
         await write_pbmsg(writer, req)
 
         resp = p2pd_pb.Response()  # type: ignore
@@ -371,17 +405,21 @@ class ControlClient:
         writer.close()
         raise_if_failed(resp)
 
-        # if success, add the handler to the dict
-        self.handlers[proto] = handler_cb
+    async def remove_stream_handler(self, proto: str) -> None:
+        reader, writer = await self.daemon_connector.open_connection()
 
+        req = p2pd_pb.Request(
+            type=p2pd_pb.Request.REMOVE_STREAM_HANDLER,
+            removeStreamHandler=p2pd_pb.RemoveStreamHandlerRequest(
+                addr=self.listen_maddr.to_bytes(),
+                proto=[proto],
+            ),
+        )
+        await write_pbmsg(writer, req)
 
-class P2PHandlerError(Exception):
-    """
-    Raised if remote handled a request with an exception
-    """
+        resp = p2pd_pb.Response()  # type: ignore
+        await read_pbmsg_safe(reader, resp)
+        writer.close()
+        raise_if_failed(resp)
 
-
-class P2PDaemonError(Exception):
-    """
-    Raised if daemon failed to handle request
-    """
+        del self.handlers[proto]

@@ -5,7 +5,7 @@
 
   This module contains decentralized optimizers that wrap your regular PyTorch Optimizer to train with peers.
   Depending on the exact configuration, Optimizer may perform large synchronous updates equivalent,
-  or perform asynchrnous local updates and average model parameters.
+  or perform asynchronous local updates and average model parameters.
 
   <br><br>
 
@@ -21,20 +21,4 @@
 
 .. currentmodule:: hivemind.optim.grad_scaler
 .. autoclass:: GradScaler
-   :member-order: bysource
-
-
-**CollaborativeOptimizer**
---------------------------
-
-
-.. automodule:: hivemind.optim.collaborative
-.. currentmodule:: hivemind.optim
-
-.. autoclass:: CollaborativeOptimizer
-   :members: step
-   :member-order: bysource
-
-.. autoclass:: CollaborativeAdaptiveOptimizer
-   :members:
    :member-order: bysource

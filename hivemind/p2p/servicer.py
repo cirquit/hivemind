@@ -104,17 +104,33 @@ class ServicerBase:
         caller.__name__ = handler.method_name
         return caller
 
-    async def add_p2p_handlers(self, p2p: P2P, wrapper: Any = None, *, namespace: Optional[str] = None) -> None:
+    async def add_p2p_handlers(
+        self, p2p: P2P, wrapper: Any = None, *, namespace: Optional[str] = None, balanced: bool = False
+    ) -> None:
         self._collect_rpc_handlers()
 
         servicer = self if wrapper is None else wrapper
-
         await asyncio.gather(
             *[
                 p2p.add_protobuf_handler(
                     self._get_handle_name(namespace, handler.method_name),
                     getattr(servicer, handler.method_name),
                     handler.request_type,
+                    stream_input=handler.stream_input,
+                    stream_output=handler.stream_output,
+                    balanced=balanced,
+                )
+                for handler in self._rpc_handlers
+            ]
+        )
+
+    async def remove_p2p_handlers(self, p2p: P2P, *, namespace: Optional[str] = None) -> None:
+        self._collect_rpc_handlers()
+
+        await asyncio.gather(
+            *[
+                p2p.remove_protobuf_handler(
+                    self._get_handle_name(namespace, handler.method_name),
                     stream_input=handler.stream_input,
                     stream_output=handler.stream_output,
                 )

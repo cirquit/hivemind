@@ -1,8 +1,10 @@
 import asyncio
 import concurrent.futures
+import multiprocessing as mp
+import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
-from typing import AsyncIterable, AsyncIterator, Awaitable, Callable, ContextManager, Optional, Tuple, TypeVar, Union
+from typing import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable, Optional, Tuple, TypeVar, Union
 
 import uvloop
 
@@ -27,6 +29,12 @@ def switch_to_uvloop() -> asyncio.AbstractEventLoop:
 async def anext(aiter: AsyncIterator[T]) -> Union[T, StopAsyncIteration]:
     """equivalent to next(iter) for asynchronous iterators. Modifies aiter in-place!"""
     return await aiter.__anext__()
+
+
+async def iter_as_aiter(iterable: Iterable[T]) -> AsyncIterator[T]:
+    """create an asynchronous iterator from single iterable"""
+    for elem in iterable:
+        yield elem
 
 
 async def as_aiter(*args: T) -> AsyncIterator[T]:
@@ -70,13 +78,6 @@ async def asingle(aiter: AsyncIterable[T]) -> T:
     if count == 0:
         raise ValueError("asingle() expected an iterable with exactly one item, but got an empty iterable")
     return item
-
-
-async def afirst(aiter: AsyncIterable[T], default: Optional[T] = None) -> Optional[T]:
-    """Returns the first item of ``aiter`` or ``default`` if ``aiter`` is empty."""
-    async for item in aiter:
-        return item
-    return default
 
 
 async def await_cancelled(awaitable: Awaitable) -> bool:
@@ -168,12 +169,25 @@ async def attach_event_on_finished(iterable: AsyncIterable[T], event: asyncio.Ev
 class _AsyncContextWrapper(AbstractAsyncContextManager):
     """Wrapper for a non-async context manager that allows entering and exiting it in EventLoop-friendly manner"""
 
+    EXECUTOR_PID = None
+    CONTEXT_EXECUTOR = None
+    EXECUTOR_LOCK = mp.Lock()
+
     def __init__(self, context: AbstractContextManager):
         self._context = context
 
+    @classmethod
+    def get_process_wide_executor(cls):
+        if os.getpid() != cls.EXECUTOR_PID:
+            with cls.EXECUTOR_LOCK:
+                if os.getpid() != cls.EXECUTOR_PID:
+                    cls.CONTEXT_EXECUTOR = ThreadPoolExecutor(max_workers=float("inf"))
+                    cls.EXECUTOR_PID = os.getpid()
+        return cls.CONTEXT_EXECUTOR
+
     async def __aenter__(self):
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._context.__enter__)
+        return await loop.run_in_executor(self.get_process_wide_executor(), self._context.__enter__)
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         return self._context.__exit__(exc_type, exc_value, traceback)

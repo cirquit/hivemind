@@ -11,14 +11,11 @@ import torch
 
 import hivemind
 from hivemind.compression import deserialize_torch_tensor, serialize_torch_tensor
-from hivemind.proto.dht_pb2_grpc import DHTStub
 from hivemind.proto.runtime_pb2 import CompressionType
-from hivemind.proto.runtime_pb2_grpc import ConnectionHandlerStub
 from hivemind.utils import BatchTensorDescriptor, DHTExpiration, HeapEntry, MSGPackSerializer, ValueWithExpiration
 from hivemind.utils.asyncio import (
     achain,
     aenumerate,
-    afirst,
     aiter_with_timeout,
     amap_in_executor,
     anext,
@@ -330,50 +327,6 @@ def test_many_futures():
     p.join()
 
 
-@pytest.mark.forked
-@pytest.mark.asyncio
-async def test_channel_cache():
-    hivemind.ChannelCache.MAXIMUM_CHANNELS = 3
-    hivemind.ChannelCache.EVICTION_PERIOD_SECONDS = 0.1
-
-    c1 = hivemind.ChannelCache.get_stub("localhost:1337", DHTStub, aio=False)
-    c2 = hivemind.ChannelCache.get_stub("localhost:1337", DHTStub, aio=True)
-    c3 = hivemind.ChannelCache.get_stub("localhost:1338", DHTStub, aio=False)
-    c3_again = hivemind.ChannelCache.get_stub("localhost:1338", DHTStub, aio=False)
-    c1_again = hivemind.ChannelCache.get_stub("localhost:1337", DHTStub, aio=False)
-    c4 = hivemind.ChannelCache.get_stub("localhost:1339", DHTStub, aio=True)
-    c2_anew = hivemind.ChannelCache.get_stub("localhost:1337", DHTStub, aio=True)
-    c1_yetagain = hivemind.ChannelCache.get_stub("localhost:1337", DHTStub, aio=False)
-
-    await asyncio.sleep(0.2)
-    c1_anew = hivemind.ChannelCache.get_stub(target="localhost:1337", aio=False, stub_type=DHTStub)
-    c1_anew_again = hivemind.ChannelCache.get_stub(target="localhost:1337", aio=False, stub_type=DHTStub)
-    c1_otherstub = hivemind.ChannelCache.get_stub(target="localhost:1337", aio=False, stub_type=ConnectionHandlerStub)
-    await asyncio.sleep(0.05)
-    c1_otherstub_again = hivemind.ChannelCache.get_stub(
-        target="localhost:1337", aio=False, stub_type=ConnectionHandlerStub
-    )
-    all_channels = [c1, c2, c3, c4, c3_again, c1_again, c2_anew, c1_yetagain, c1_anew, c1_anew_again, c1_otherstub]
-
-    assert all(isinstance(c, DHTStub) for c in all_channels[:-1])
-    assert isinstance(all_channels[-1], ConnectionHandlerStub)
-    assert "aio" in repr(c2.rpc_find)
-    assert "aio" not in repr(c1.rpc_find)
-
-    duplicates = {
-        (c1, c1_again),
-        (c1, c1_yetagain),
-        (c1_again, c1_yetagain),
-        (c3, c3_again),
-        (c1_anew, c1_anew_again),
-        (c1_otherstub, c1_otherstub_again),
-    }
-    for i in range(len(all_channels)):
-        for j in range(i + 1, len(all_channels)):
-            ci, cj = all_channels[i], all_channels[j]
-            assert (ci is cj) == ((ci, cj) in duplicates), (i, j)
-
-
 def test_serialize_tuple():
     test_pairs = (
         ((1, 2, 3), [1, 2, 3]),
@@ -419,7 +372,7 @@ def test_split_parts():
     for combined in combined_incomplete, combined_incomplete2, combined_incomplete3:
         with pytest.raises(RuntimeError):
             deserialize_torch_tensor(combined)
-            # note: we rely on this being RuntimeError in hivemind.averaging.allreduce.AllreduceRunner
+            # note: we rely on this being RuntimeError in hivemind.averaging.allreduce.AllReduceRunner
 
 
 def test_generic_data_classes():
@@ -475,11 +428,6 @@ async def test_asyncio_utils():
         await asingle(as_aiter())
     with pytest.raises(ValueError):
         await asingle(as_aiter(1, 2, 3))
-
-    assert await afirst(as_aiter(1)) == 1
-    assert await afirst(as_aiter()) is None
-    assert await afirst(as_aiter(), -1) == -1
-    assert await afirst(as_aiter(1, 2, 3)) == 1
 
     async def iterate_with_delays(delays):
         for i, delay in enumerate(delays):
@@ -557,6 +505,32 @@ async def test_async_context():
 
     await asyncio.wait_for(asyncio.gather(coro1(), coro2()), timeout=0.5)
     # running this without enter_asynchronously would deadlock the event loop
+
+
+@pytest.mark.asyncio
+async def test_async_context_flooding():
+    """
+    test for a possible deadlock when many coroutines await the lock and overwhelm the underlying ThreadPoolExecutor
+
+    Here's how the test below works: suppose that the thread pool has at most N workers;
+    If at least N + 1 coroutines await lock1 concurrently, N of them occupy workers and the rest are awaiting workers;
+    When the first of N workers acquires lock1, it lets coroutine A inside lock1 and into await sleep(1e-2);
+    During that sleep, one of the worker-less coroutines will take up the worker freed by coroutine A.
+    Finally, coroutine A finishes sleeping and immediately gets stuck at lock2, because there are no free workers.
+    Thus, every single coroutine is either awaiting an already acquired lock, or awaiting for free workers in executor.
+
+    """
+    lock1, lock2 = mp.Lock(), mp.Lock()
+
+    async def coro():
+        async with enter_asynchronously(lock1):
+            await asyncio.sleep(1e-2)
+            async with enter_asynchronously(lock2):
+                await asyncio.sleep(1e-2)
+
+    num_coros = max(100, mp.cpu_count() * 5 + 1)
+    # note: if we deprecate py3.7, this can be reduced to max(33, cpu + 5); see https://bugs.python.org/issue35279
+    await asyncio.wait({coro() for _ in range(num_coros)})
 
 
 def test_batch_tensor_descriptor_msgpack():

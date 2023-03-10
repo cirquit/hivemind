@@ -13,7 +13,6 @@ from hivemind.compression import CompressionBase, NoCompression
 from hivemind.dht import DHT
 from hivemind.optim.grad_averager import GradientAverager, GradientAveragerFactory
 from hivemind.optim.grad_scaler import GradScaler
-from hivemind.optim.power_sgd_averager import PowerSGDGradientAverager
 from hivemind.optim.progress_tracker import LocalTrainingProgress, ProgressTracker
 from hivemind.optim.state_averager import (
     LRSchedulerBase,
@@ -57,11 +56,11 @@ class Optimizer(torch.optim.Optimizer):
 
     Unlike regular training, your device may join midway through training, when other peers already made some progress.
     For this reason, any learning rate schedulers, curriculum and other **time-dependent features should be based on**
-    ``optimizer.local_epoch`` (and not the number ot calls to opt.step). Otherwise, peers that joined training late
+    ``optimizer.local_epoch`` (and not the number of calls to opt.step). Otherwise, peers that joined training late
     may end up having different learning rates. To do so automatically, specify ``scheduler=...`` parameter below.
 
     :What is an epoch?: Optimizer uses the term ``epoch`` to describe intervals between synchronizations. One epoch
-      coresponds to processing certain number of training samples (``target_batch_size``) in total across all peers.
+      corresponds to processing certain number of training samples (``target_batch_size``) in total across all peers.
       Like in PyTorch LR Scheduler, **epoch does not necessarily correspond to a full pass over the training data.**
       At the end of epoch, peers perform synchronous actions such as averaging gradients for a global optimizer update,
       updating the learning rate scheduler or simply averaging parameters (if using local updates).

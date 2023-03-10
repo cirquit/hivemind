@@ -8,6 +8,7 @@ import ctypes
 import multiprocessing as mp
 import os
 import random
+import signal
 import threading
 import weakref
 from dataclasses import asdict
@@ -25,8 +26,7 @@ from hivemind.averaging.matchmaking import Matchmaking, MatchmakingException
 from hivemind.averaging.partition import DEFAULT_PART_SIZE_BYTES
 from hivemind.compression import CompressionBase, CompressionInfo, NoCompression, deserialize_torch_tensor
 from hivemind.dht import DHT, DHTID
-from hivemind.p2p import P2P, P2PContext, P2PHandlerError, PeerID, ServicerBase
-from hivemind.p2p.p2p_daemon_bindings.utils import ControlFailure, DispatchFailure
+from hivemind.p2p import P2P, P2PContext, P2PDaemonError, P2PHandlerError, PeerID, ServicerBase
 from hivemind.proto import averaging_pb2
 from hivemind.utils import MPFuture, TensorDescriptor, get_logger
 from hivemind.utils.asyncio import (
@@ -38,8 +38,8 @@ from hivemind.utils.asyncio import (
     enter_asynchronously,
     switch_to_uvloop,
 )
-from hivemind.utils.grpc import combine_from_streaming, split_for_streaming
 from hivemind.utils.serializer import MSGPackSerializer, SerializerBase
+from hivemind.utils.streaming import combine_from_streaming, split_for_streaming
 from hivemind.utils.timed_storage import DHTExpiration, ValueWithExpiration, get_dht_time
 
 # flavour types
@@ -63,7 +63,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
     :param min_matchmaking_time: when looking for group, wait for requests for at least this many seconds
     :param compression: optionally compress tensors with this compression algorithm before running all-reduce
     :param state_compression: a separate compression strategy for load_state_from_peers (default = no compression)
-    :param tensor_infos: CompressionInfo for each respective tensor; this determines how the tensor will be comressed
+    :param tensor_infos: CompressionInfo for each respective tensor; this determines how the tensor will be compressed
     :param averaging_alpha: optional "learning rate" for averaging. If specified, local parameters will be shifted
       towards the (estimated) average by this coefficient. By default, local parameters are set equal to average.
     :param request_timeout: when looking for group, wait for a response from leader for at most this many seconds.
@@ -118,7 +118,6 @@ class DecentralizedAverager(mp.Process, ServicerBase):
         target_group_size: Optional[int] = None,
         min_group_size: int = 2,
         initial_group_bits: str = "",
-        averaging_expiration: Optional[float] = None,
         min_matchmaking_time: float = 5.0,
         request_timeout: float = 3.0,
         averaging_alpha: float = 1.0,
@@ -145,11 +144,6 @@ class DecentralizedAverager(mp.Process, ServicerBase):
         ), "bandwidth must be a non-negative float32"
         assert all(bit in "01" for bit in initial_group_bits)
         assert not client_mode or not auxiliary, "auxiliary peers must accept incoming connections"
-
-        if averaging_expiration is not None:
-            logger.warning("averaging_expiration is deprecated and will be removed soon, use min_matchmaking_time")
-            assert min_matchmaking_time == 5.0, "Can't set both averaging_expiration and min_matchmaking_time"
-            min_matchmaking_time = averaging_expiration
 
         super().__init__()
         self.dht = dht
@@ -337,6 +331,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
         Starts averager in a background process. if await_ready, this method will wait until background dht
         is ready to process incoming requests or for :timeout: seconds max.
         """
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         self.start()
         if await_ready:
             self.wait_until_ready(timeout)
@@ -357,6 +352,9 @@ class DecentralizedAverager(mp.Process, ServicerBase):
             logger.exception("Averager shutdown has no effect: the process is already not alive")
 
     async def _shutdown(self, timeout: Optional[float]) -> None:
+        if not self.client_mode:
+            await self.remove_p2p_handlers(self._p2p, namespace=self.prefix)
+
         remaining_tasks = set()
         for group in self._running_groups.values():
             remaining_tasks.update(group.finalize(cancel=True))
@@ -379,7 +377,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
         """
         Set up the averager to look for a group and run one round of averaging, return True on success, False on failure
 
-        :param gather: optionally send this informaton to all peers in the next group and gather it from every groupmate
+        :param gather: optionally send this information to all peers in the next group and gather it from every groupmate
           (this operation is known as all-gather). The gathered data will be available as the output of this function.
         :param scheduled_time: when matchmaking, assume that all-reduce will begin at this moment.
           By default, schedule all-reduce current time plus min_matchmaking_time seconds
@@ -477,8 +475,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                     asyncio.CancelledError,
                     asyncio.InvalidStateError,
                     P2PHandlerError,
-                    DispatchFailure,
-                    ControlFailure,
+                    P2PDaemonError,
                 ) as e:
                     if step.done() or not step.allow_retries or get_dht_time() >= step.deadline:
                         if not step.cancelled():
@@ -658,7 +655,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
 
     def get_current_state(self) -> Tuple[Any, Sequence[torch.Tensor], Sequence[CompressionInfo]]:
         """
-        Get current state and send it to a peer. executed in the host process. Meant to be overriden.
+        Get current state and send it to a peer. executed in the host process. Meant to be overridden.
         :returns: a tuple of (small metadata, sequence of torch tensors)
         :note: metadata must be seriablizable with self.serializer (default = MSGPackSerializer)
         """
@@ -714,6 +711,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                         stream = await stub.rpc_download_state(averaging_pb2.DownloadRequest())
                         current_tensor_parts, tensors = [], []
 
+                        # TODO merge this with hivemind.compression.deserialize_tensor_stream
                         async for message in aiter_with_timeout(stream, timeout=timeout):
                             if message.metadata:
                                 metadata = self.serializer.loads(message.metadata)

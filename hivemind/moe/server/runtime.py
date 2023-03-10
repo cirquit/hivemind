@@ -12,7 +12,7 @@ from typing import Dict, NamedTuple, Optional
 import torch
 from prefetch_generator import BackgroundGenerator
 
-from hivemind.moe.server.expert_backend import ExpertBackend
+from hivemind.moe.server.module_backend import ModuleBackend
 from hivemind.utils import get_logger
 
 logger = get_logger(__name__)
@@ -20,20 +20,20 @@ logger = get_logger(__name__)
 
 class Runtime(threading.Thread):
     """
-    A group of processes that processes incoming requests for multiple experts on a shared device.
+    A group of processes that processes incoming requests for multiple module backends on a shared device.
     Runtime is usually created and managed by Server, humans need not apply.
 
     For debugging, you can start runtime manually with .start() or .run()
 
-    >>> expert_backends = {'expert_name': ExpertBackend(**kwargs)}
-    >>> runtime = Runtime(expert_backends)
+    >>> module_backends = {'expert_name': ModuleBackend(**kwargs)}
+    >>> runtime = Runtime(module_backends)
     >>> runtime.start()  # start runtime in background thread. To start in current thread, use runtime.run()
     >>> runtime.ready.wait()  # await for runtime to load all experts on device and create request pools
-    >>> future = runtime.expert_backends['expert_name'].forward_pool.submit_task(*expert_inputs)
+    >>> future = runtime.module_backends['expert_name'].forward_pool.submit_task(*module_inputs)
     >>> print("Returned:", future.result())
     >>> runtime.shutdown()
 
-    :param expert_backends: a dict [expert uid -> ExpertBackend]
+    :param module_backends: a dict [expert uid -> ModuleBackend]
     :param prefetch_batches: form up to this many batches in advance
     :param sender_threads: dispatches outputs from finished batches using this many asynchronous threads
     :param device: if specified, moves all experts and data to this device via .to(device=device).
@@ -46,15 +46,15 @@ class Runtime(threading.Thread):
 
     def __init__(
         self,
-        expert_backends: Dict[str, ExpertBackend],
+        module_backends: Dict[str, ModuleBackend],
         prefetch_batches=64,
         sender_threads: int = 1,
         device: torch.device = None,
         stats_report_interval: Optional[int] = None,
     ):
         super().__init__()
-        self.expert_backends = expert_backends
-        self.pools = tuple(chain(*(expert.get_pools() for expert in expert_backends.values())))
+        self.module_backends = module_backends
+        self.pools = tuple(chain(*(backend.get_pools() for backend in module_backends.values())))
         self.device, self.prefetch_batches, self.sender_threads = device, prefetch_batches, sender_threads
         self.shutdown_recv, self.shutdown_send = mp.Pipe(duplex=False)
         self.shutdown_trigger = mp.Event()
@@ -69,8 +69,8 @@ class Runtime(threading.Thread):
             if not pool.is_alive():
                 pool.start()
         if self.device is not None:
-            for expert_backend in self.expert_backends.values():
-                expert_backend.expert.to(self.device)
+            for backend in self.module_backends.values():
+                backend.module.to(self.device)
 
         with mp.pool.ThreadPool(self.sender_threads) as output_sender_pool:
             try:
@@ -79,22 +79,31 @@ class Runtime(threading.Thread):
                     self.stats_reporter.start()
                 logger.info("Started")
 
-                for pool, batch_index, batch in BackgroundGenerator(
-                    self.iterate_minibatches_from_pools(), self.prefetch_batches
-                ):
+                batch_iterator = self.iterate_minibatches_from_pools()
+                if self.prefetch_batches > 0:
+                    batch_iterator = BackgroundGenerator(batch_iterator, self.prefetch_batches)
+
+                for pool, batch_index, batch in batch_iterator:
                     logger.debug(f"Processing batch {batch_index} from pool {pool.name}")
 
                     start = time()
-                    outputs = pool.process_func(*batch)
-                    batch_processing_time = time() - start
+                    try:
+                        outputs = pool.process_func(*batch)
+                        batch_processing_time = time() - start
 
-                    batch_size = outputs[0].size(0)
-                    logger.debug(f"Pool {pool.name}: batch {batch_index} processed, size {batch_size}")
+                        batch_size = outputs[0].size(0)
+                        logger.debug(f"Pool {pool.name}: batch {batch_index} processed, size {batch_size}")
 
-                    if self.stats_report_interval is not None:
-                        self.stats_reporter.report_stats(pool.name, batch_size, batch_processing_time)
+                        if self.stats_report_interval is not None:
+                            self.stats_reporter.report_stats(pool.name, batch_size, batch_processing_time)
 
-                    output_sender_pool.apply_async(pool.send_outputs_from_runtime, args=[batch_index, outputs])
+                        output_sender_pool.apply_async(pool.send_outputs_from_runtime, args=[batch_index, outputs])
+                    except KeyboardInterrupt:
+                        raise
+                    except BaseException as exception:
+                        logger.exception(f"Caught {exception}, attempting to recover")
+                        output_sender_pool.apply_async(pool.send_exception_from_runtime, args=[batch_index, exception])
+
             finally:
                 if not self.shutdown_trigger.is_set():
                     self.shutdown()
@@ -120,9 +129,7 @@ class Runtime(threading.Thread):
         self.shutdown_trigger.set()
 
     def iterate_minibatches_from_pools(self, timeout=None):
-        """
-        Chooses pool according to priority, then copies exposed batch and frees the buffer
-        """
+        """Iteratively select non-empty pool with highest priority and loads a batch from that pool"""
         with DefaultSelector() as selector:
             for pool in self.pools:
                 selector.register(pool.batch_receiver, EVENT_READ, pool)
@@ -136,8 +143,8 @@ class Runtime(threading.Thread):
                 if self.SHUTDOWN_TRIGGER in ready_objects:
                     break  # someone asked us to shutdown, break from the loop
 
-                logger.debug("Choosing the pool with highest priority")
-                pool = max(ready_objects, key=lambda pool: pool.priority)
+                logger.debug("Choosing the pool with first priority")
+                pool = min(ready_objects, key=lambda pool: pool.priority)
 
                 logger.debug(f"Loading batch from {pool.name}")
                 batch_index, batch_tensors = pool.load_batch_to_runtime(timeout, self.device)

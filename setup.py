@@ -14,10 +14,15 @@ from setuptools import find_packages, setup
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 
-P2PD_VERSION = "v0.3.6"
-P2PD_CHECKSUM = "627d0c3b475a29331fdfd1667e828f6d"
-LIBP2P_TAR_URL = f"https://github.com/learning-at-home/go-libp2p-daemon/archive/refs/tags/{P2PD_VERSION}.tar.gz"
-P2PD_BINARY_URL = f"https://github.com/learning-at-home/go-libp2p-daemon/releases/download/{P2PD_VERSION}/p2pd"
+P2PD_VERSION = "v0.3.16"
+
+P2PD_SOURCE_URL = f"https://github.com/learning-at-home/go-libp2p-daemon/archive/refs/tags/{P2PD_VERSION}.tar.gz"
+P2PD_BINARY_URL = f"https://github.com/learning-at-home/go-libp2p-daemon/releases/download/{P2PD_VERSION}/"
+
+# The value is sha256 of the binary from the release page
+EXECUTABLES = {
+    "p2pd": "057ec61edbe926cf049e9532d43ea9540da55db7b2d8c816d2bbdddce23f3cdf",
+}
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -37,7 +42,6 @@ def proto_compile(output_path):
         "grpc_tools.protoc",
         "--proto_path=hivemind/proto",
         f"--python_out={output_path}",
-        f"--grpc_python_out={output_path}",
     ] + glob.glob("hivemind/proto/*.proto")
 
     code = grpc_tools.protoc.main(cli_args)
@@ -133,7 +137,9 @@ with open("requirements-dev.txt") as dev_requirements_file:
 with open("requirements-docs.txt") as docs_requirements_file:
     extras["docs"] = list(map(str, parse_requirements(docs_requirements_file)))
 
-extras["all"] = extras["dev"] + extras["docs"]
+extras["bitsandbytes"] = ["bitsandbytes~=0.37.0"]
+
+extras["all"] = extras["dev"] + extras["docs"] + extras["bitsandbytes"]
 
 setup(
     name="hivemind",
@@ -170,6 +176,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
+            "hivemind-dht = hivemind.hivemind_cli.run_dht:main",
             "hivemind-server = hivemind.hivemind_cli.run_server:main",
         ]
     },

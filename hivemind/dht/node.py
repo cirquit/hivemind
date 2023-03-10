@@ -146,7 +146,7 @@ class DHTNode:
         :param cache_locally: if True, caches all values (stored or found) in a node-local cache
         :param cache_on_store: if True, update cache entries for a key after storing a new item for that key
         :param cache_nearest: whenever DHTNode finds a value, it will also store (cache) this value on this many
-          nodes nearest nodes visited by search algorithm. Prefers nodes that are nearest to :key: but have no value yet
+          nearest nodes visited by search algorithm. Prefers nodes that are nearest to :key: but have no value yet
         :param cache_size: if specified, local cache will store up to this many records (as in LRU cache)
         :param cache_refresh_before_expiry: if nonzero, refreshes locally cached values
           if they are accessed this many seconds before expiration time.
@@ -271,6 +271,7 @@ class DHTNode:
     async def shutdown(self):
         """Process existing requests, close all connections and stop the server"""
         self.is_alive = False
+        await self.protocol.shutdown()
         if self._should_shutdown_p2p:
             await self.p2p.shutdown()
 
@@ -341,7 +342,7 @@ class DHTNode:
     ) -> bool:
         """
         Find num_replicas best nodes to store (key, value) and store it there at least until expiration time.
-        :note: store is a simplified interface to store_many, all kwargs are be forwarded there
+        :note: store is a simplified interface to store_many, all kwargs are forwarded there
         :returns: True if store succeeds, False if it fails (due to no response or newer value)
         """
         store_ok = await self.store_many([key], [value], [expiration_time], subkeys=[subkey], **kwargs)
@@ -585,7 +586,7 @@ class DHTNode:
             If min_expiration_time=float('inf'), this method will find a value with _latest_ expiration
         :param beam_size: maintains up to this many nearest nodes when crawling dht, default beam_size = bucket_size
         :param num_workers: override for default num_workers, see traverse_dht num_workers param
-        :param return_futures: if True, immediately return asyncio.Future for every before interacting with the nework.
+        :param return_futures: if True, immediately return asyncio.Future for every before interacting with the network.
          The algorithm will populate these futures with (value, expiration) when it finds the corresponding key
          Note: canceling a future will stop search for the corresponding key
         :param _is_refresh: internal flag, set to True by an internal cache refresher (if enabled)
