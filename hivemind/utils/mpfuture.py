@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures._base as base
 import multiprocessing as mp
-import multiprocessing.connection
 import os
 import threading
 import uuid
 from contextlib import nullcontext
 from enum import Enum, auto
+from multiprocessing.reduction import ForkingPickler
 from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 from weakref import ref
 
@@ -95,6 +95,8 @@ class MPFuture(base.Future, Generic[ResultType]):
     _active_pid: Optional[PID] = None  # pid of currently active process; used to handle forks natively
 
     def __init__(self, *, use_lock: bool = True):
+        self._maybe_initialize_mpfuture_backend()
+
         self._origin_pid, self._uid = os.getpid(), uuid.uuid4().int
         self._shared_state_code = SharedBytes.next()
         self._state_cache: Dict[State, State] = {}
@@ -105,11 +107,6 @@ class MPFuture(base.Future, Generic[ResultType]):
         self._state, self._result, self._exception = base.PENDING, None, None
         self._use_lock = use_lock
 
-        if self._origin_pid != MPFuture._active_pid:
-            with MPFuture._initialization_lock:
-                if self._origin_pid != MPFuture._active_pid:
-                    # note: the second if is intentional, see https://en.wikipedia.org/wiki/Double-checked_locking
-                    self._initialize_mpfuture_backend()
         assert self._uid not in MPFuture._active_futures
         MPFuture._active_futures[self._uid] = ref(self)
         self._sender_pipe = MPFuture._global_sender_pipe
@@ -127,7 +124,8 @@ class MPFuture(base.Future, Generic[ResultType]):
 
     @_state.setter
     def _state(self, new_state: State):
-        self._shared_state_code[...] = ALL_STATES.index(new_state)
+        with torch.inference_mode():
+            self._shared_state_code[...] = ALL_STATES.index(new_state)
         if self._state in TERMINAL_STATES and self._loop is not None and not self._aio_event.is_set():
             self._set_event_threadsafe()
 
@@ -150,16 +148,23 @@ class MPFuture(base.Future, Generic[ResultType]):
             self._loop.run_until_complete(_event_setter())
 
     @classmethod
-    def _initialize_mpfuture_backend(cls):
+    def _maybe_initialize_mpfuture_backend(cls):
         pid = os.getpid()
-        logger.debug(f"Initializing MPFuture backend for pid {pid}")
+        if pid != MPFuture._active_pid:
+            with MPFuture._initialization_lock:
+                if pid != MPFuture._active_pid:
+                    # note: the second if is intentional, see https://en.wikipedia.org/wiki/Double-checked_locking
+                    logger.debug(f"Initializing MPFuture backend for pid {pid}")
 
-        receiver_pipe, cls._global_sender_pipe = mp.Pipe(duplex=False)
-        cls._active_pid, cls._active_futures = pid, {}
-        cls._pipe_waiter_thread = threading.Thread(
-            target=cls._process_updates_in_background, args=[receiver_pipe], name=f"{__name__}.BACKEND", daemon=True
-        )
-        cls._pipe_waiter_thread.start()
+                    receiver_pipe, cls._global_sender_pipe = mp.Pipe(duplex=False)
+                    cls._active_pid, cls._active_futures = pid, {}
+                    cls._pipe_waiter_thread = threading.Thread(
+                        target=cls._process_updates_in_background,
+                        args=[receiver_pipe],
+                        name=f"{__name__}.BACKEND",
+                        daemon=True,
+                    )
+                    cls._pipe_waiter_thread.start()
 
     @staticmethod
     def reset_backend():
@@ -295,7 +300,7 @@ class MPFuture(base.Future, Generic[ResultType]):
             raise asyncio.CancelledError()
 
     def __del__(self):
-        if getattr(self, "_origin_pid", None) == os.getpid():
+        if getattr(self, "_origin_pid", None) == os.getpid() and MPFuture._active_futures is not None:
             MPFuture._active_futures.pop(self._uid, None)
         if getattr(self, "_aio_event", None):
             self._aio_event.set()
@@ -303,7 +308,7 @@ class MPFuture(base.Future, Generic[ResultType]):
     def __getstate__(self):
         return dict(
             _sender_pipe=self._sender_pipe,
-            _shared_state_code=self._shared_state_code,
+            _shared_state_code=ForkingPickler.dumps(self._shared_state_code).tobytes(),
             _origin_pid=self._origin_pid,
             _uid=self._uid,
             _use_lock=self._use_lock,
@@ -313,7 +318,14 @@ class MPFuture(base.Future, Generic[ResultType]):
 
     def __setstate__(self, state):
         self._sender_pipe = state["_sender_pipe"]
-        self._shared_state_code = state["_shared_state_code"]
+        try:
+            self._shared_state_code = ForkingPickler.loads(state["_shared_state_code"])
+        except RuntimeError:
+            # If the origin process garbage-collects all instances of MPFuture using the same shmem buffer,
+            # the underlying buffer is freed, and we will get RuntimeError ("unable to open shared memory object")
+            # here since it is not possible to connect to this buffer anymore. To address this, we just replace
+            # the buffer with a non-shared tensor since the origin process doesn't care about our state anymore.
+            self._shared_state_code = torch.tensor([ALL_STATES.index(base.PENDING)], dtype=torch.uint8)
         self._origin_pid, self._uid = state["_origin_pid"], state["_uid"]
         self._result, self._exception = state["_result"], state["_exception"]
         self._use_lock = state["_use_lock"]

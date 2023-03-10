@@ -18,6 +18,7 @@ import hivemind.hivemind_cli as cli
 import hivemind.p2p.p2p_daemon_bindings.p2pclient as p2pclient
 from hivemind.p2p.p2p_daemon_bindings.control import DEFAULT_MAX_MSG_SIZE, P2PDaemonError, P2PHandlerError
 from hivemind.p2p.p2p_daemon_bindings.datastructures import PeerID, PeerInfo, StreamInfo
+from hivemind.p2p.p2p_daemon_bindings.utils import ControlFailure
 from hivemind.proto import crypto_pb2
 from hivemind.proto.p2pd_pb2 import RPCError
 from hivemind.utils.asyncio import as_aiter, asingle
@@ -102,6 +103,9 @@ class P2P:
         quic: Optional[bool] = None,
         use_relay_hop: Optional[bool] = None,
         use_relay_discovery: Optional[bool] = None,
+        check_if_identity_free: bool = True,
+        no_listen: bool = False,
+        trusted_relays: Optional[Sequence[Union[Multiaddr, str]]] = None,
     ) -> "P2P":
         """
         Start a new p2pd process and connect to it.
@@ -123,12 +127,21 @@ class P2P:
         :param relay_hop_limit: sets the hop limit for hop relays
         :param startup_timeout: raise a P2PDaemonError if the daemon does not start in ``startup_timeout`` seconds
         :param tls: Enables TLS1.3 channel security protocol
-        :param use_auto_relay: enables autorelay
         :param use_ipfs: Bootstrap to IPFS (incompatible with initial_peers)
-        :param use_relay: enables circuit relay
+        :param use_relay: Enable circuit relay functionality in libp2p
+                          (see https://docs.libp2p.io/concepts/nat/circuit-relay/).
+                          If enabled (default), you can reach peers behind NATs/firewalls through libp2p relays.
+                          If you are behind NAT/firewall yourself,
+                          please pass `use_auto_relay=True` to become reachable.
+        :param use_auto_relay: Look for libp2p relays to become reachable if we are behind NAT/firewall
         :param quic: Deprecated, has no effect since libp2p 0.17.0
         :param use_relay_hop: Deprecated, has no effect since libp2p 0.17.0
         :param use_relay_discovery: Deprecated, has no effect since libp2p 0.17.0
+        :param check_if_identity_free: If enabled (default), ``identity_path`` is provided,
+                                       and we are connecting to an existing swarm,
+                                       ensure that this identity is not used by other peers already.
+                                       This slows down ``P2P.create()`` but protects from unintuitive libp2p errors
+                                       appearing in case of the identity collision.
         :return: a wrapper for the p2p daemon
         """
 
@@ -164,14 +177,29 @@ class P2P:
             ("bootstrapPeers", initial_peers),
             ("hostAddrs", host_maddrs),
             ("announceAddrs", announce_maddrs),
+            ("trustedRelays", trusted_relays),
         ]:
             if value:
                 process_kwargs[param] = self._maddrs_to_str(value)
-
+        if no_listen:
+            process_kwargs["noListenAddrs"] = 1
         if identity_path is not None:
-            if not os.path.isfile(identity_path):
-                logger.info(f"Generating new identity (libp2p private key) in `{identity_path}`")
+            if os.path.isfile(identity_path):
+                if check_if_identity_free and need_bootstrap:
+                    logger.info(f"Checking that identity from `{identity_path}` is not used by other peers")
+                    if await cls.is_identity_taken(
+                        identity_path,
+                        initial_peers=initial_peers,
+                        tls=tls,
+                        use_auto_relay=use_auto_relay,
+                        use_ipfs=use_ipfs,
+                        use_relay=use_relay,
+                    ):
+                        raise P2PDaemonError(f"Identity from `{identity_path}` is already taken by another peer")
+            else:
+                logger.info(f"Generating new identity to be saved in `{identity_path}`")
                 self.generate_identity(identity_path)
+                # A newly generated identity is not taken with ~100% probability
             process_kwargs["id"] = identity_path
 
         proc_args = self._make_process_args(
@@ -216,6 +244,36 @@ class P2P:
 
         await self._ping_daemon()
         return self
+
+    @classmethod
+    async def is_identity_taken(
+        cls,
+        identity_path: str,
+        *,
+        initial_peers: Optional[Sequence[Union[Multiaddr, str]]],
+        tls: bool,
+        use_auto_relay: bool,
+        use_ipfs: bool,
+        use_relay: bool,
+    ) -> bool:
+        with open(identity_path, "rb") as f:
+            peer_id = PeerID.from_identity(f.read())
+
+        anonymous_p2p = await cls.create(
+            initial_peers=initial_peers,
+            dht_mode="client",
+            tls=tls,
+            use_auto_relay=use_auto_relay,
+            use_ipfs=use_ipfs,
+            use_relay=use_relay,
+        )
+        try:
+            await anonymous_p2p._client.connect(peer_id, [])
+            return True
+        except ControlFailure:
+            return False
+        finally:
+            await anonymous_p2p.shutdown()
 
     @staticmethod
     def generate_identity(identity_path: str) -> None:

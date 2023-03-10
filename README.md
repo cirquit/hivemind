@@ -24,17 +24,18 @@ large model on hundreds of computers from different universities, companies, and
   Decentralized Mixture-of-Experts ([paper](https://arxiv.org/abs/2002.04013)).
 
 To learn more about the ideas behind this library,
-see the [full list](https://github.com/learning-at-home/hivemind/tree/refer-to-discord-in-docs#citation) of our papers below.
+see the [full list](#citation) of our papers below.
 
 ## Example Use Cases
 
 This section lists projects that leverage hivemind for decentralized training. 
-If you have succesfully trained a model or created a downstream repository with the help of our library, 
+If you have successfully trained a model or created a downstream repository with the help of our library, 
 feel free to submit a pull request that adds your project to this list.
 
-* **sahajBERT** ([blog post](https://huggingface.co/blog/collaborative-training), [code](https://github.com/tanmoyio/sahajbert)) — a collaboratively pretrained ALBERT-xlarge for the Bengali language.
-* **CALM** ([webpage](https://huggingface.co/CALM), [code](https://github.com/NCAI-Research/CALM)) — a masked language model trained on a combination of Arabic datasets.
+* **Petals** ([webpage](https://petals.ml), [code](https://github.com/bigscience-workshop/petals)) — a decentralized platform for inference and fine-tuning of 100B+ language models.
 * **Training Transformers Together** ([webpage](https://training-transformers-together.github.io/), [code](https://github.com/learning-at-home/dalle-hivemind)) — a NeurIPS 2021 demonstration that trained a collaborative text-to-image Transformer model.
+* **CALM** ([webpage](https://huggingface.co/CALM), [code](https://github.com/NCAI-Research/CALM)) — a masked language model trained on a combination of Arabic datasets.
+* **sahajBERT** ([blog post](https://huggingface.co/blog/collaborative-training), [code](https://github.com/tanmoyio/sahajbert)) — a collaboratively pretrained ALBERT-xlarge for the Bengali language.
 * **HivemindStrategy** ([docs](https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.strategies.HivemindStrategy.html)) in PyTorch Lightning allows adapting your existing pipelines to training over slow network with unreliable peers.
 
 ## Installation
@@ -52,6 +53,10 @@ If your versions of Python and PyTorch match the requirements, you can install h
 ```
 pip install hivemind
 ```
+
+Also, if you want to use blockwise 8-bit compression from [bitsandbytes](https://github.com/TimDettmers/bitsandbytes) 
+during data transfer, you can install it with `pip install hivemind[bitsandbytes]`. 
+After that, you can use the `BlockwiseQuantization` class in [hivemind.compression](./hivemind/compression)
 
 ### From source
 
