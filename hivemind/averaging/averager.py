@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+import wandb
 
 from hivemind.averaging.allreduce import AllreduceException, AllReduceRunner, AveragingMode, GroupID
 from hivemind.averaging.control import AveragingStage, StepControl
@@ -447,6 +448,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                     group_info = await matchmaking_task
 
                     if group_info is None:
+                        wandb.log({ "03_hivemind/averaging_group_not_found": 1 }, commit=False)
                         raise AllreduceException("Averaging step failed: could not find a group")
 
                     with self._register_allreduce_group(group_info):
@@ -531,6 +533,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
         except BaseException as e:
             if isinstance(e, Exception):
                 logger.exception(e)
+            wandb.log({ "averager/error/unable_allreduce": 1 })
             raise MatchmakingException(f"Unable to run All-Reduce: {e}")
 
     async def _run_allreduce_inplace_(
@@ -598,6 +601,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
 
     async def _declare_for_download_periodically(self):
         download_key = f"{self._matchmaking.group_key_manager.prefix}.all_averagers"
+        logger.info(f"DecentralizedAverager:_declare_for_download_periodically: download_key = {download_key}")
         sharing_was_allowed = self.allow_state_sharing
         while True:
             expiration_time = get_dht_time() + self.declare_state_period
@@ -685,6 +689,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
             timeout = self.next_chunk_timeout if self.next_chunk_timeout is not None else self.request_timeout
         try:
             key_manager = self._matchmaking.group_key_manager
+            logger.info(f"DecentralizedAverager:_load_state_from_peers: all_averagers key = {key_manager.prefix}.all_averagers")
             peer_priority, _ = self.dht.get(f"{key_manager.prefix}.all_averagers", latest=True) or ({}, None)
             peer_priority = {
                 PeerID(peer_id): (float(info.value), random.random())  # using randomness as a tie breaker
@@ -721,8 +726,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
                         if not metadata:
                             logger.debug(f"Peer {peer} did not send its state")
                             continue
-
-                        logger.info(f"Finished downloading state from {peer}")
+                        logger.info(f"DecentralizedAverager:_load_state_from_peers: Finished downloading state from {peer}")
                         future.set_result((metadata, tensors))
                         return
                     except Exception as e:

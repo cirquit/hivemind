@@ -2,7 +2,6 @@ import contextlib
 from typing import Callable, Iterable, Iterator, Optional, Sequence, TypeVar
 
 import torch
-
 from hivemind.averaging import DecentralizedAverager
 from hivemind.averaging.control import StepControl
 from hivemind.dht import DHT
@@ -139,6 +138,7 @@ class GradientAverager(DecentralizedAverager):
             # remember the first batch size to correctly re-scale gradients if subsequent batches have a different size
             self._anchor_batch_size = batch_size
         self.local_samples_accumulated += batch_size
+        logger.info(f"GradientAverager.accumulate_grads_: Added {batch_size} to self.local_samples_accumulated, now: {self.local_samples_accumulated}")
         self.local_times_accumulated += 1
         if self.reuse_grad_buffers:
             pass  # user is responsible for accumulating gradients in .grad buffers

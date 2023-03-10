@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import base58
 import numpy as np
 from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
 
@@ -155,16 +156,20 @@ class ProgressTracker(threading.Thread):
         extra_samples = samples_accumulated - self.local_progress.samples_accumulated
         if update_global_samples and local_epoch == self.local_progress.epoch == self.global_progress.epoch:
             self.global_progress.samples_accumulated += extra_samples
+            logger.info(f"ProgressTracker.report_local_progress: Added {extra_samples} to  global_progress.samples_accumulated: {self.global_progress.samples_accumulated}")
             # note: the above line can decrease the number of samples, e.g. if forced to reset due to overflow
+        else:
+            logger.info(f"ProgressTracker.report_local_progress: Did not add {extra_samples} to global_progress.samples_accumulated due to: {update_global_samples} and local_epoch: {local_epoch} == self.local_progress.epoch {self.local_progress.epoch} == self.global_progress.epoch {self.global_progress.epoch}")
 
         if extra_samples > 0:
             self.performance_ema.update(task_size=extra_samples)
-            logger.debug(f"Updated performance EMA: {self.performance_ema.samples_per_second:.5f}")
+            logger.info(f"ProgressTracker.report_local_progress: Updated performance EMA {self.performance_ema.samples_per_second:.5f} samples/s")
         else:
-            logger.debug("Resetting performance timestamp to current time (progress was reset)")
+            logger.info("ProgressTracker.report_local_progress: Resetting performance timestamp to current time (progress was reset)")
             self.performance_ema.reset_timer()
 
         self.local_progress = self._get_local_progress(local_epoch, samples_accumulated)
+        logger.info(f"ProgressTracker.report_local_progress: set self.local_progress.epoch to {self.local_progress.epoch} and samples_accumulated to {self.local_progress.samples_accumulated}")
         self.should_report_progress.set()
 
     @contextlib.contextmanager
@@ -203,7 +208,7 @@ class ProgressTracker(threading.Thread):
                 logger.debug(f"Will report progress again in {wait_timeout} seconds or on user command")
                 await asyncio.get_event_loop().run_in_executor(None, self.should_report_progress.wait, wait_timeout)
                 if self.should_report_progress.is_set():
-                    logger.debug(f"Progress update triggered by report_local_progress")
+                    logger.info(f"ProgressTracker._progress_reporter (async): Progress update triggered by report_local_progress")
                     self.should_report_progress.clear()
                 else:
                     logger.debug(f"Progress update triggered by metadata_expiration")
@@ -227,6 +232,7 @@ class ProgressTracker(threading.Thread):
                             timeout=self.metadata_expiration,
                         )
                     )
+                    logger.info("ProgressTracker._progress_reporter (async): DHT store ops is finished for the local progress dict")
         finally:
             logger.log(self.status_loglevel, f"No longer reporting progress for {self.prefix}")
             if store_task is not None:
@@ -240,7 +246,6 @@ class ProgressTracker(threading.Thread):
         shutdown_checker = asyncio.create_task(
             asyncio.wait_for(loop.run_in_executor(None, self.shutdown_triggered.wait), None)
         )
-
         async def _fetch_progress_unless_shutdown_triggered():
             """Fetch progress, avoid deadlocks if DHT was shut down before this get finished."""
             getter = asyncio.create_task(
@@ -253,6 +258,7 @@ class ProgressTracker(threading.Thread):
 
         try:
             while not self.shutdown_triggered.is_set():
+
                 time_to_next_update = max(0.0, self.global_progress.next_fetch_time - get_dht_time())
                 state_updated_externally = await loop.run_in_executor(
                     None, self.global_state_updated.wait, time_to_next_update
@@ -265,6 +271,7 @@ class ProgressTracker(threading.Thread):
                     maybe_metadata = await _fetch_progress_unless_shutdown_triggered()
                     if self.shutdown_triggered.is_set():
                         break
+                    logger.info(f"ProgressTracker:_progress_fetcher: Getting {self.training_progress_key}..")
                     metadata = maybe_metadata.value if isinstance(maybe_metadata, ValueWithExpiration) else None
                     self.global_progress = self._parse_swarm_progress_data(metadata)
                     self.fetched_global_progress_this_epoch.set()
@@ -308,10 +315,13 @@ class ProgressTracker(threading.Thread):
         total_samples_accumulated = estimated_current_samples = 0
         total_samples_per_second = self.performance_ema.eps
 
+        logger.info(f"ProgressTracker._parse_swarm_progress_data: Accumulating samples for global epoch {global_epoch}...")
         for peer in valid_peer_entries:
             total_samples_per_second += peer.samples_per_second
+            logger.info(f"  - peer: {base58.b58encode(peer.peer_id).decode()}, epoch: {peer.epoch}, sps: {peer.samples_per_second}")
             if peer.epoch == global_epoch:
                 total_samples_accumulated += peer.samples_accumulated
+                logger.info(f"    + epoch matches! samples_accumulated: {peer.samples_accumulated}, total_samples_accumulated: {total_samples_accumulated}")
                 estimated_current_samples += (
                     peer.samples_accumulated + max(0.0, current_time - peer.time) * peer.samples_per_second
                 )
@@ -331,7 +341,7 @@ class ProgressTracker(threading.Thread):
         )
         logger.log(
             self.status_loglevel,
-            f"{self.prefix} accumulated {total_samples_accumulated} samples for epoch #{global_epoch} from "
+            f"ProgressTracker._parse_swarm_progress_data: {self.prefix} accumulated {total_samples_accumulated} samples for epoch #{global_epoch} from "
             f"{num_peers} peers. ETA {estimated_time_to_next_epoch:.2f} sec (refresh in {time_to_next_fetch:.2f} sec)",
         )
         return GlobalTrainingProgress(
