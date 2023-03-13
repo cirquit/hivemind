@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import base58
 import numpy as np
 from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
 
@@ -156,7 +157,10 @@ class ProgressTracker(threading.Thread):
         if update_global_samples and local_epoch == self.local_progress.epoch == self.global_progress.epoch:
             self.global_progress.samples_accumulated += extra_samples
             # note: the above line can decrease the number of samples, e.g. if forced to reset due to overflow
-
+        else:
+            logger.info(
+                f"Did not add {extra_samples} due to local_epoch: {local_epoch}, local_progress.epoch: {self.local_progress.epoch}, global_progress.epoch: {self.global_progress.epoch}"
+            )
         if extra_samples > 0:
             self.performance_ema.update(task_size=extra_samples)
             logger.debug(f"Updated performance EMA: {self.performance_ema.samples_per_second:.5f}")
@@ -308,10 +312,17 @@ class ProgressTracker(threading.Thread):
         total_samples_accumulated = estimated_current_samples = 0
         total_samples_per_second = self.performance_ema.eps
 
+        logger.info(f"Gathering swarm progress for epoch {global_epoch}")
         for peer in valid_peer_entries:
+            logger.info(
+                f"  - peer: {base58.b58encode(peer.peer_id).decode()}, epoch: {peer.epoch}, sps: {peer.samples_per_second}"
+            )
             total_samples_per_second += peer.samples_per_second
             if peer.epoch == global_epoch:
                 total_samples_accumulated += peer.samples_accumulated
+                logger.info(
+                    f"    + epoch match. peer samples: {peer.samples_accumulated}, total samples: {total_samples_accumulated}"
+                )
                 estimated_current_samples += (
                     peer.samples_accumulated + max(0.0, current_time - peer.time) * peer.samples_per_second
                 )
@@ -329,8 +340,7 @@ class ProgressTracker(threading.Thread):
                 a_max=self.max_refresh_period,
             )
         )
-        logger.log(
-            self.status_loglevel,
+        logger.info(
             f"{self.prefix} accumulated {total_samples_accumulated} samples for epoch #{global_epoch} from "
             f"{num_peers} peers. ETA {estimated_time_to_next_epoch:.2f} sec (refresh in {time_to_next_fetch:.2f} sec)",
         )

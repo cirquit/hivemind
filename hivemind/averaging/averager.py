@@ -599,6 +599,7 @@ class DecentralizedAverager(mp.Process, ServicerBase):
     async def _declare_for_download_periodically(self):
         download_key = f"{self._matchmaking.group_key_manager.prefix}.all_averagers"
         sharing_was_allowed = self.allow_state_sharing
+        logger.info(f"Declaring averaging download key = {download_key}")
         while True:
             expiration_time = get_dht_time() + self.declare_state_period
             if self.allow_state_sharing or sharing_was_allowed:
