@@ -321,7 +321,7 @@ class ProgressTracker(threading.Thread):
             if peer.epoch == global_epoch:
                 total_samples_accumulated += peer.samples_accumulated
                 logger.info(
-                    f"    + epoch match. peer samples: {peer.samples_accumulated}, total samples: {total_samples_accumulated}"
+                    f"    + epoch match. peer samples: {peer.samples_accumulated}, total samples: {round(total_samples_accumulated,2)}"
                 )
                 estimated_current_samples += (
                     peer.samples_accumulated + max(0.0, current_time - peer.time) * peer.samples_per_second
